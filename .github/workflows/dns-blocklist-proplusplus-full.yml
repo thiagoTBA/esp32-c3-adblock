@@ -1,0 +1,88 @@
+name: ESP32 DNS - HaGeZi PRO++ full test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/dns-blocklist-proplusplus-full.yml'
+      - 'tools/build_blocklist.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build-blocklists:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the full PRO++ test lists
+        run: |
+          set -euo pipefail
+          mkdir -p proplusplus_completa proplusplus_completa_youtube mini_youtube_reserva
+          HAGEZI_FULL='https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.plus-onlydomains.txt'
+          HAGEZI_MINI='https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.plus.mini-onlydomains.txt'
+          YOUTUBE='https://raw.githubusercontent.com/kboghdady/youTube_ads_4_pi-hole/master/youtubelist.txt'
+          python3 tools/build_blocklist.py proplusplus_completa/blocklist.bin "$HAGEZI_FULL"
+          python3 tools/build_blocklist.py proplusplus_completa_youtube/blocklist.bin "$HAGEZI_FULL" "$YOUTUBE"
+          python3 tools/build_blocklist.py mini_youtube_reserva/blocklist.bin "$HAGEZI_MINI" "$YOUTUBE"
+      - name: Validate hash ordering, capacity and profiles
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          configs = {
+              'mini_youtube_reserva': (50000, 150000),
+              'proplusplus_completa': (150000, 240000),
+              'proplusplus_completa_youtube': (150000, 250000),
+          }
+          counts = {}
+          fs_size = 0x150000  # ESP32 classic DevKit 4MB LittleFS partition
+          for name,(minimum,maximum) in configs.items():
+              p = Path(name) / 'blocklist.bin'
+              data = p.read_bytes()
+              assert len(data) % 5 == 0 and 0 < len(data) < fs_size - 131072, (name,len(data))
+              hashes = [int.from_bytes(data[i:i+5], 'little') for i in range(0, len(data), 5)]
+              assert hashes == sorted(set(hashes)), f'{name}: invalid hash ordering/duplicates'
+              n = len(hashes)
+              assert minimum < n < maximum, (name,n)
+              counts[name] = n
+              print(f'{name}: {n:,} entries, {len(data):,} bytes, {fs_size-len(data):,} bytes raw flash margin')
+          assert counts['proplusplus_completa_youtube'] >= counts['proplusplus_completa']
+          assert counts['proplusplus_completa'] > counts['mini_youtube_reserva']
+          PY
+      - name: Write quick-start
+        run: |
+          cat > LEIA_PRIMEIRO.txt <<'TXT'
+          ESP32 Classic DevKit V1 - DNS blocklist experiment
+          All three files are 40-bit FNV-1a sorted blocklist.bin images.
+          Each folder contains its own blocklist.bin; DO NOT upload the ZIP or a firmware image.
+
+          For an apples-to-apples test, start with:
+            proplusplus_completa_youtube/blocklist.bin  = HaGeZi PRO++ FULL + YouTube list.
+          If you want the HaGeZi-only control group:
+            proplusplus_completa/blocklist.bin          = HaGeZi PRO++ FULL.
+          If sites/videos break, restore:
+            mini_youtube_reserva/blocklist.bin           = regenerated smaller experimental list.
+          For the exact previous 94,829-entry backup, use the previous successful artifact:
+            https://github.com/thiagoTBA/esp32-c3-adblock/actions/runs/37858706485
+
+          ESP32 dashboard: BLOCKLIST -> Upload. DO NOT use Firmware OTA.
+          Leave Remote Auto-Update blank during this trial.
+          The firmware temporarily deletes the current list at upload start;
+          a failed/interrupted upload can leave DNS filtering off.
+          If that happens, re-upload the smaller backup.
+
+          A full DNS list still cannot reliably stop in-stream YouTube ads.
+          TXT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hagezi-proplusplus-full-esp32-teste
+          path: |
+            proplusplus_completa/blocklist.bin
+            proplusplus_completa_youtube/blocklist.bin
+            mini_youtube_reserva/blocklist.bin
+            LEIA_PRIMEIRO.txt
+          if-no-files-found: error
+          retention-days: 30
