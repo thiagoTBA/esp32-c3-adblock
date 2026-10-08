@@ -1,0 +1,70 @@
+name: ESP32 DevKit V1 — DNS AdBlock
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/esp32dev-adblock.yml'
+      - 'src/**'
+      - 'platformio.ini'
+      - 'partitions.csv'
+      - 'tools/build_blocklist.py'
+
+permissions:
+  contents: read
+
+jobs:
+  esp32dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: pip install -U platformio esptool
+      - name: Generate temporary non-sensitive fallback headers
+        run: cp src/secrets.example.h src/secrets.h
+      - name: Compile for classic ESP32 DevKit V1
+        run: pio run -e esp32dev
+      - name: Generate HaGeZi Pro++ Mini DNS hash list
+        run: |
+          python3 tools/build_blocklist.py data/blocklist.bin https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.plus.mini-onlydomains.txt
+          size=$(stat -c%s data/blocklist.bin)
+          echo "Blocklist size: $size bytes"
+          test "$size" -gt 100000
+          test "$size" -lt 1250000
+          test $((size % 5)) -eq 0
+      - name: Build LittleFS partition image
+        run: pio run -e esp32dev -t buildfs
+      - name: Validate firmware and filesystem image sizes
+        run: |
+          ls -lh .pio/build/esp32dev/
+          test $(stat -c%s .pio/build/esp32dev/firmware.bin) -le 1376256
+          test $(stat -c%s .pio/build/esp32dev/littlefs.bin) -eq 1376256
+      - name: Package browser flash files
+        run: |
+          mkdir -p dist
+          cp .pio/build/esp32dev/bootloader.bin dist/bootloader.bin
+          cp .pio/build/esp32dev/partitions.bin dist/partitions.bin
+          cp .pio/build/esp32dev/firmware.bin dist/firmware.bin
+          cp .pio/build/esp32dev/littlefs.bin dist/littlefs.bin
+          cat > dist/FLASH_ADDRESSES.txt <<'TXT'
+          ESP32 CLASSIC ONLY — NOT ESP32-C3.
+          Chrome / Edge + ESPTool JS web flasher:
+          0x1000   bootloader.bin
+          0x8000   partitions.bin
+          0x10000  firmware.bin
+          0x2B0000 littlefs.bin
+          Choose chip ESP32, not ESP32-C3. Flash all four files at those offsets.
+          Erasing/overwriting will replace the existing NAT-router firmware.
+          At first boot connect to C3-AdBlock-XXXX and configure Wi-Fi plus
+          unique web-admin and OTA passwords (at least 12 characters).
+          This is a local DNS server, not an internet router.
+          Test on one device before changing the router DHCP DNS.
+          TXT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32dev-adblock-hagezi-proplusplus-mini
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
