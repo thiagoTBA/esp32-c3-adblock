@@ -1,0 +1,54 @@
+name: DNS blocklist variants (stable + YouTube)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/dns-blocklist-variants.yml'
+      - 'tools/build_blocklist.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build-lists:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create both lists in ESP32-native 40-bit hash format
+        run: |
+          mkdir -p stable experimental
+          HAGEZI='https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.plus.mini-onlydomains.txt'
+          YOUTUBE='https://raw.githubusercontent.com/kboghdady/youTube_ads_4_pi-hole/master/youtubelist.txt'
+          python3 tools/build_blocklist.py stable/blocklist.bin "$HAGEZI"
+          python3 tools/build_blocklist.py experimental/blocklist.bin "$HAGEZI" "$YOUTUBE"
+          python3 - <<'PY'
+          import os
+          a = os.path.getsize('stable/blocklist.bin')
+          b = os.path.getsize('experimental/blocklist.bin')
+          print(f'Stable: {a // 5} DNS hashes ({a} bytes)')
+          print(f'Experimental: {b // 5} DNS hashes ({b} bytes)')
+          assert 50000 <= a//5 < b//5 < 250000
+          assert b <= 1200000 and a % 5 == 0 and b % 5 == 0
+          PY
+      - name: Explain installation
+        run: |
+          cat > INSTRUCOES.txt <<'TXT'
+          For the running ESP32 DNS AdBlock dashboard -> BLOCKLIST -- UPLOAD:
+          1. Experimental: upload experimental/blocklist.bin.
+          2. If YouTube playback breaks, restore stable/blocklist.bin.
+          3. This is NOT firmware. Do NOT upload at FIRMWARE -- OTA UPDATE.
+          4. The YouTube list does not guarantee ad blocking and may break video playback.
+          5. Keep Remote auto-update empty for now to avoid overwriting manual tests.
+          TXT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blocklists-stable-e-youtube-experimental
+          path: |
+            stable/blocklist.bin
+            experimental/blocklist.bin
+            INSTRUCOES.txt
+          if-no-files-found: error
+          retention-days: 30
