@@ -1,0 +1,95 @@
+name: ESP32 AdBlock - daily DNS blocklist
+
+on:
+  schedule:
+    - cron: '27 5 * * *' # daily at 05:27 UTC (01:27 Manaus)
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/daily-dns-blocklist.yml'
+      - 'tools/build_blocklist.py'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-dns-blocklist-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build compact lists for ESP32 (HaGeZi PRO++ Mini + YouTube)
+        run: |
+          set -euo pipefail
+          HAGEZI='https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.plus.mini-onlydomains.txt'
+          YOUTUBE='https://raw.githubusercontent.com/kboghdady/youTube_ads_4_pi-hole/master/youtubelist.txt'
+          python3 tools/build_blocklist.py blocklist.bin "$HAGEZI" "$YOUTUBE"
+          python3 tools/build_blocklist.py blocklist-stable.bin "$HAGEZI"
+      - name: Check valid 40-bit blobs and size bounds
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          info = {}
+          for filename, low, high in [('blocklist.bin', 80000, 160000),
+                                     ('blocklist-stable.bin', 50000, 130000)]:
+              raw = Path(filename).read_bytes()
+              if not raw or len(raw) % 5:
+                  raise SystemExit(f'{filename}: not a 5-byte-aligned hash list')
+              hashes = [int.from_bytes(raw[i:i+5], 'little') for i in range(0, len(raw), 5)]
+              if hashes != sorted(set(hashes)):
+                  raise SystemExit(f'{filename}: unsorted or duplicate hashes')
+              if not low <= len(hashes) <= high or len(raw) > 900000:
+                  raise SystemExit(f'{filename}: unexpected size or domain count')
+              info[filename] = {'domains': len(hashes), 'bytes': len(raw),
+                                'sha256': hashlib.sha256(raw).hexdigest()}
+              print(f'{filename}: {len(hashes):,} DNS hashes, {len(raw):,} bytes')
+          if info['blocklist.bin']['domains'] <= info['blocklist-stable.bin']['domains']:
+              raise SystemExit('Combined YouTube list unexpectedly did not add any domains')
+          info['built_at_utc'] = datetime.now(timezone.utc).isoformat()
+          info['sources'] = [
+              'https://github.com/hagezi/dns-blocklists',
+              'https://github.com/kboghdady/youTube_ads_4_pi-hole',
+          ]
+          Path('blocklist-manifest.json').write_text(json.dumps(info, indent=2) + '\n')
+          PY
+      - name: Publish assets at stable GitHub Release URLs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG='daily-dns'
+          NOTES="Rebuilt daily from HaGeZi PRO++ Mini + YouTube Ads blocklist.
+          ESP32 automatic remote update URL:
+          https://github.com/${{ github.repository }}/releases/download/daily-dns/blocklist.bin
+
+          Optional HaGeZi-only backup:
+          https://github.com/${{ github.repository }}/releases/download/daily-dns/blocklist-stable.bin
+
+          DNS-only blocking cannot guarantee removal of YouTube in-stream ads.
+          See blocklist-manifest.json for hashes/counts."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" --title 'ESP32 Daily DNS Blocklist' --notes "$NOTES" --latest=false
+          fi
+          gh release upload "$TAG" blocklist.bin blocklist-stable.bin blocklist-manifest.json --clobber
+          gh release view "$TAG" --json assets --jq '.assets[] | [.name, .size, .url] | @tsv'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32-daily-dns-blocklist-backup
+          path: |
+            blocklist.bin
+            blocklist-stable.bin
+            blocklist-manifest.json
+          retention-days: 30
